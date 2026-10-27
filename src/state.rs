@@ -2,6 +2,7 @@ use crate::context::Context;
 use crate::files::FileKind;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,9 @@ pub struct StateEntry {
 pub struct State {
     pub version: u32,
     pub files: Vec<StateEntry>,
+    /// Items that runix added, by resource name
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl State {
@@ -51,7 +55,7 @@ impl State {
         let tmp = path.with_extension("json.tmp");
         let state = Self {
             version: VERSION,
-            files: self.files.clone(),
+            ..self.clone()
         };
         fs::write(&tmp, serde_json::to_string_pretty(&state)?)?;
         fs::rename(&tmp, path)?;

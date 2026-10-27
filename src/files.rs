@@ -544,6 +544,7 @@ mod tests {
             State {
                 version: 1,
                 files: entries.iter().map(Entry::record).collect(),
+                ..Default::default()
             },
         )
     }
@@ -557,6 +558,7 @@ mod tests {
             State {
                 version: 1,
                 files: entries.iter().map(Entry::record).collect(),
+                ..Default::default()
             },
         )
     }

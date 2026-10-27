@@ -3,6 +3,7 @@ use crate::context::Context;
 use crate::files::{self, FileAction, FileDecl, FileKind};
 use crate::plan::{self, Plan};
 use crate::providers::Provider;
+use crate::resources::Resource;
 use crate::runner::{Cmd, Runner};
 use crate::state::State;
 use crate::style;
@@ -25,10 +26,16 @@ struct Managed {
     used: bool,
 }
 
+struct Ensured {
+    resource: &'static dyn Resource,
+    items: BTreeSet<String>,
+}
+
 /// Declared state of the machine
 pub struct System {
     ctx: Context,
     managed: Vec<Managed>,
+    resources: Vec<Ensured>,
     files: RefCell<Vec<FileDecl>>,
 }
 
@@ -72,6 +79,7 @@ impl System {
         Ok(Self {
             ctx: Context::new(cli)?,
             managed,
+            resources: Vec::new(),
             files: RefCell::new(Vec::new()),
         })
     }
@@ -88,6 +96,41 @@ impl System {
         let managed = self.managed(&provider);
         managed.ignored.extend(pkgs.iter().map(|p| p.to_string()));
         self
+    }
+
+    /// Registers resources (panics if one is registered twice)
+    pub fn manage(&mut self, resources: &[&'static dyn Resource]) -> &mut Self {
+        for &resource in resources {
+            if self.has_resource(resource) {
+                panic!("resource {} is registered twice", resource.name());
+            }
+            self.resources.push(Ensured {
+                resource,
+                items: BTreeSet::new(),
+            });
+        }
+        self
+    }
+
+    /// Declares items of a registered resource (panics if unregistered)
+    pub fn ensure<R: Resource>(&mut self, resource: R, items: &[&str]) -> &mut Self {
+        let name = resource.name();
+        let Some(ensured) = self
+            .resources
+            .iter_mut()
+            .find(|r| r.resource.name() == name)
+        else {
+            panic!("resource {name} is not registered, add it with System::manage");
+        };
+        ensured.items.extend(items.iter().map(|i| i.to_string()));
+        self
+    }
+
+    /// Reports whether a resource is registered
+    pub fn has_resource<R: Resource + ?Sized>(&self, resource: &R) -> bool {
+        self.resources
+            .iter()
+            .any(|r| r.resource.name() == resource.name())
     }
 
     /// Reports whether a provider is registered
@@ -165,10 +208,40 @@ impl System {
         let state = State::load(&State::path(&self.ctx))?;
         let entries = files::expand(&self.ctx, &self.files.borrow())?;
         let files = files::plan(&self.ctx, &entries, &state)?;
-        let next_state = plan::next_state(&self.ctx, &entries, &state);
+        let mut next_state = plan::next_state(&self.ctx, &entries, &state);
+
+        let mut resources = Vec::new();
+        for r in &self.resources {
+            let name = r.resource.name();
+            let owned = state.resources.get(name).cloned().unwrap_or_default();
+            resources.push(plan::plan_resource(
+                run, r.resource, &r.items, &owned, prune,
+            )?);
+            let mut next = r.items.clone();
+            if !prune {
+                next.extend(owned);
+            }
+            if next.is_empty() {
+                next_state.resources.remove(name);
+            } else {
+                next_state.resources.insert(name.into(), next);
+            }
+        }
+        for name in state.resources.keys() {
+            if !self.resources.iter().any(|r| r.resource.name() == name) {
+                eprintln!(
+                    "{}",
+                    style::yellow(&format!(
+                        "warning: resource {name} has items in the state but is not registered"
+                    ))
+                );
+            }
+        }
+
         Ok(Plan {
             packages,
             files,
+            resources,
             next_state,
         })
     }
@@ -350,6 +423,14 @@ impl System {
                 p.provider.remove(&run, &p.remove)?;
             }
         }
+        for r in &plan.resources {
+            if !r.add.is_empty() {
+                r.resource.add(&run, &r.add)?;
+            }
+            if !r.remove.is_empty() {
+                r.resource.remove(&run, &r.remove)?;
+            }
+        }
         plan.next_state.save(&state_path)?;
         println!("{}", style::green("Applied"));
         Ok(())
@@ -388,6 +469,7 @@ impl System {
         let plan = Plan {
             packages: Vec::new(),
             files: actions,
+            resources: Vec::new(),
             next_state,
         };
         if plan.is_empty() {
@@ -496,6 +578,7 @@ fn confirm(question: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::providers::{Cargo, Pacman};
+    use crate::resources::{Services, UserServices};
 
     fn system(providers: &[&'static dyn Provider]) -> Result<System> {
         let cli = Cli::parse_from(["runix", "--root", env!("CARGO_MANIFEST_DIR")]);
@@ -506,6 +589,18 @@ mod tests {
     #[should_panic(expected = "provider cargo is not registered")]
     fn unregistered_provider_panics() {
         system(&[&Pacman]).unwrap().pkgs(Cargo, &["ripgrep"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "resource services is not registered")]
+    fn unregistered_resource_panics() {
+        system(&[]).unwrap().ensure(Services, &["sshd"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "resource user-services is registered twice")]
+    fn duplicate_resource_panics() {
+        system(&[]).unwrap().manage(&[&UserServices, &UserServices]);
     }
 
     #[test]

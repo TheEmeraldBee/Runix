@@ -1,6 +1,7 @@
 use crate::context::Context;
 use crate::files::{self, Entry, FileAction};
 use crate::providers::{Package, Provider};
+use crate::resources::Resource;
 use crate::runner::Runner;
 use crate::state::{State, StateEntry};
 use crate::style;
@@ -29,10 +30,25 @@ impl PackagePlan<'_> {
     }
 }
 
+/// Item changes for one resource
+pub struct ResourcePlan<'a> {
+    pub resource: &'a dyn Resource,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
+impl ResourcePlan<'_> {
+    /// Reports whether the resource needs no change
+    pub fn is_empty(&self) -> bool {
+        self.add.is_empty() && self.remove.is_empty()
+    }
+}
+
 /// Changes that `apply` makes
 pub struct Plan<'a> {
     pub packages: Vec<PackagePlan<'a>>,
     pub files: Vec<FileAction>,
+    pub resources: Vec<ResourcePlan<'a>>,
     /// State saved after a successful `apply`
     pub next_state: State,
 }
@@ -40,7 +56,9 @@ pub struct Plan<'a> {
 impl Plan<'_> {
     /// Reports whether the system already matches the config
     pub fn is_empty(&self) -> bool {
-        self.packages.iter().all(PackagePlan::is_empty) && self.files.is_empty()
+        self.packages.iter().all(PackagePlan::is_empty)
+            && self.files.is_empty()
+            && self.resources.iter().all(ResourcePlan::is_empty)
     }
 
     /// Returns the file actions that block the plan
@@ -73,7 +91,11 @@ impl Plan<'_> {
             FileAction::Remove(s) => files::needs_root(ctx, &s.target),
             FileAction::Release { .. } => false,
         });
-        pkgs || files
+        let resources = self
+            .resources
+            .iter()
+            .any(|r| !r.is_empty() && r.resource.needs_root());
+        pkgs || files || resources
     }
 
     /// Returns the plan as a display tree
@@ -104,6 +126,16 @@ impl Plan<'_> {
             }
             root.push(node);
         }
+        for res in self.resources.iter().filter(|r| !r.is_empty()) {
+            let mut node = Node::new(style::bold(res.resource.name()));
+            for item in &res.add {
+                node.push(Node::new(style::green(&format!("+ {item}"))));
+            }
+            for item in &res.remove {
+                node.push(Node::new(style::red(&format!("- {item}"))));
+            }
+            root.push(node);
+        }
         root
     }
 
@@ -127,6 +159,14 @@ impl Plan<'_> {
                 count(|a| matches!(a, FileAction::Update(_))),
                 count(|a| matches!(a, FileAction::Remove(_))),
                 count(|a| matches!(a, FileAction::Conflict { .. })),
+            ));
+        }
+        for r in self.resources.iter().filter(|r| !r.is_empty()) {
+            out.push(format!(
+                "{}: {} to add, {} to remove",
+                r.resource.name(),
+                r.add.len(),
+                r.remove.len(),
             ));
         }
         out
@@ -187,6 +227,35 @@ pub(crate) fn plan_packages<'a>(
     })
 }
 
+pub(crate) fn plan_resource<'a>(
+    run: &Runner,
+    resource: &'a dyn Resource,
+    declared: &BTreeSet<String>,
+    owned: &BTreeSet<String>,
+    prune: bool,
+) -> Result<ResourcePlan<'a>> {
+    let stale: Vec<String> = if prune {
+        owned.difference(declared).cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let query: Vec<String> = declared.iter().chain(&stale).cloned().collect();
+    let present = if query.is_empty() {
+        BTreeSet::new()
+    } else {
+        resource.present(run, &query)?
+    };
+    Ok(ResourcePlan {
+        resource,
+        add: declared
+            .iter()
+            .filter(|i| !present.contains(*i))
+            .cloned()
+            .collect(),
+        remove: stale.into_iter().filter(|i| present.contains(i)).collect(),
+    })
+}
+
 pub(crate) fn next_state(ctx: &Context, entries: &[Entry], old: &State) -> State {
     let mut files: Vec<StateEntry> = entries.iter().map(Entry::record).collect();
     if ctx.cli.no_prune {
@@ -201,6 +270,7 @@ pub(crate) fn next_state(ctx: &Context, entries: &[Entry], old: &State) -> State
     State {
         version: old.version,
         files,
+        resources: old.resources.clone(),
     }
 }
 
@@ -295,5 +365,36 @@ mod tests {
         assert_eq!(plan.mark_explicit, ["dep"]);
         assert_eq!(plan.remove, ["old"]);
         assert_eq!(plan.mark_dependency, ["needed"]);
+    }
+
+    struct FakeResource;
+
+    impl Resource for FakeResource {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn present(&self, _run: &Runner, items: &[String]) -> Result<BTreeSet<String>> {
+            let on = set(&["kept", "old"]);
+            Ok(items.iter().filter(|i| on.contains(*i)).cloned().collect())
+        }
+        fn add(&self, _run: &Runner, _items: &[String]) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _run: &Runner, _items: &[String]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn adds_missing_and_removes_owned_leftovers() {
+        let run = Runner::default();
+        let declared = set(&["kept", "new"]);
+        let owned = set(&["kept", "old", "gone"]);
+        let plan = plan_resource(&run, &FakeResource, &declared, &owned, true).unwrap();
+        assert_eq!(plan.add, ["new"]);
+        assert_eq!(plan.remove, ["old"]);
+
+        let plan = plan_resource(&run, &FakeResource, &declared, &owned, false).unwrap();
+        assert!(plan.remove.is_empty());
     }
 }
