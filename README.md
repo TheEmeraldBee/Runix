@@ -10,8 +10,8 @@ Runix is a Rust framework for declarative OS configuration.
 use runix::prelude::*;
 
 fn main() -> Result<()> {
-    // Create the system with Pacman and Cargo as providers
-    let mut system = System::init(&[&Pacman, &Cargo])?;
+    // Create the system with Yay and Cargo as providers
+    let mut system = System::init(&[&Yay, &Cargo])?;
 
     // Apply the system changes
     system.apply()

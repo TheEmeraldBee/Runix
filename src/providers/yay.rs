@@ -3,13 +3,13 @@ use crate::runner::{Cmd, Runner};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Provider for native repo packages
+/// Provider for repo and AUR packages
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Pacman;
+pub struct Yay;
 
-impl Provider for Pacman {
+impl Provider for Yay {
     fn name(&self) -> &'static str {
-        "pacman"
+        "yay"
     }
 
     fn resolve(&self, run: &Runner, specs: &[String]) -> Result<Vec<Package>> {
@@ -27,19 +27,23 @@ impl Provider for Pacman {
     }
 
     fn explicit(&self, run: &Runner) -> Result<BTreeSet<String>> {
-        Ok(lines(&run.read_any(&Cmd::new("pacman").arg("-Qqen"))?))
+        Ok(lines(&run.read_any(&Cmd::new("yay").arg("-Qqe"))?))
     }
 
     fn installed(&self, run: &Runner) -> Result<BTreeSet<String>> {
-        Ok(lines(&run.read_any(&Cmd::new("pacman").arg("-Qq"))?))
+        Ok(lines(&run.read_any(&Cmd::new("yay").arg("-Qq"))?))
     }
 
     fn removable(&self, run: &Runner) -> Result<BTreeSet<String>> {
-        Ok(lines(&run.read_any(&Cmd::new("pacman").arg("-Qqentt"))?))
+        Ok(lines(&run.read_any(&Cmd::new("yay").arg("-Qqett"))?))
     }
 
     fn protected(&self) -> &'static [&'static str] {
         &["base", "glibc", "pacman", "sudo", "systemd"]
+    }
+
+    fn ignored(&self) -> &'static [&'static str] {
+        &["yay", "yay-bin"]
     }
 
     fn needs_root(&self) -> bool {
@@ -48,46 +52,42 @@ impl Provider for Pacman {
 
     fn install(&self, run: &Runner, pkgs: &[Package]) -> Result<()> {
         let specs = pkgs.iter().map(|p| p.spec.as_str());
-        run.run(&pacman().args(["-S", "--needed", "--noconfirm"]).args(specs))
+        run.run(&yay().args(["-S", "--needed", "--noconfirm"]).args(specs))
     }
 
     fn mark_explicit(&self, run: &Runner, names: &[String]) -> Result<()> {
         run.run(
-            &pacman()
+            &yay()
                 .args(["-D", "--asexplicit"])
                 .args(names.iter().cloned()),
         )
     }
 
     fn mark_dependency(&self, run: &Runner, names: &[String]) -> Result<()> {
-        run.run(
-            &pacman()
-                .args(["-D", "--asdeps"])
-                .args(names.iter().cloned()),
-        )
+        run.run(&yay().args(["-D", "--asdeps"]).args(names.iter().cloned()))
     }
 
     fn remove(&self, run: &Runner, names: &[String]) -> Result<()> {
         run.run(
-            &pacman()
+            &yay()
                 .args(["-Rns", "--noconfirm"])
                 .args(names.iter().cloned()),
         )
     }
 
     fn upgrade(&self, run: &Runner, _pkgs: &[Package], yes: bool) -> Result<()> {
-        let cmd = pacman().arg("-Syu");
+        let cmd = yay().arg("-Syu");
         run.run(&if yes { cmd.arg("--noconfirm") } else { cmd })
     }
 
     fn search(&self, run: &Runner, query: &str) -> Result<Option<Vec<SearchResult>>> {
-        let text = run.read_any(&Cmd::new("pacman").args(["-Ss", query]))?;
+        let text = run.read_any(&Cmd::new("yay").args(["-Ss", query]))?;
         Ok(Some(parse_search(&text)))
     }
 }
 
-fn pacman() -> Cmd {
-    Cmd::new("pacman").sudo(true)
+fn yay() -> Cmd {
+    Cmd::new("yay")
 }
 
 fn parse_search(text: &str) -> Vec<SearchResult> {
@@ -110,16 +110,12 @@ fn groups(run: &Runner, specs: &[String]) -> Result<BTreeMap<String, Vec<String>
     if specs.iter().all(|s| s.contains('/')) {
         return Ok(out);
     }
-    let known = lines(&run.read_any(&Cmd::new("pacman").arg("-Sg"))?);
+    let known = lines(&run.read_any(&Cmd::new("yay").arg("-Sg"))?);
     let wanted: Vec<&String> = specs.iter().filter(|s| known.contains(*s)).collect();
     if wanted.is_empty() {
         return Ok(out);
     }
-    let listing = run.read(
-        &Cmd::new("pacman")
-            .arg("-Sg")
-            .args(wanted.into_iter().cloned()),
-    )?;
+    let listing = run.read(&Cmd::new("yay").arg("-Sg").args(wanted.into_iter().cloned()))?;
     for line in listing.lines() {
         if let Some((group, pkg)) = line.split_once(' ') {
             out.entry(group.to_string())
@@ -136,12 +132,12 @@ mod tests {
 
     #[test]
     fn parses_search_output() {
-        let text = "extra/jujutsu 0.23.0-1 [installed]\n    Git-compatible VCS\ncachyos/jj-fzf 0.25-1\n    Fuzzy finder for jj\n";
+        let text = "extra/jujutsu 0.23.0-1 [installed]\n    Git-compatible VCS\naur/jjui-bin 0.9.0-1 (+12 1.05) (Installed)\n    TUI for jj\n";
         assert_eq!(
             parse_search(text),
             [
                 SearchResult::new("extra/jujutsu", "0.23.0-1", "Git-compatible VCS"),
-                SearchResult::new("cachyos/jj-fzf", "0.25-1", "Fuzzy finder for jj"),
+                SearchResult::new("aur/jjui-bin", "0.9.0-1", "TUI for jj"),
             ]
         );
     }

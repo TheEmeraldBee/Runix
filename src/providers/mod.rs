@@ -1,8 +1,10 @@
+mod brew;
 mod cargo;
-mod pacman;
+mod yay;
 
+pub use brew::Brew;
 pub use cargo::Cargo;
-pub use pacman::Pacman;
+pub use yay::Yay;
 
 use crate::runner::Runner;
 use anyhow::Result;
@@ -81,6 +83,11 @@ pub trait Provider {
 
     /// Returns the packages that pruning never removes
     fn protected(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Returns the packages that pruning always skips
+    fn ignored(&self) -> &'static [&'static str] {
         &[]
     }
 

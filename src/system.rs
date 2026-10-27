@@ -72,7 +72,7 @@ impl System {
             managed.push(Managed {
                 provider,
                 specs: Vec::new(),
-                ignored: BTreeSet::new(),
+                ignored: provider.ignored().iter().map(|p| p.to_string()).collect(),
                 used: false,
             });
         }
@@ -577,7 +577,7 @@ fn confirm(question: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{Cargo, Pacman};
+    use crate::providers::{Cargo, Yay};
     use crate::resources::{Services, UserServices};
 
     fn system(providers: &[&'static dyn Provider]) -> Result<System> {
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "provider cargo is not registered")]
     fn unregistered_provider_panics() {
-        system(&[&Pacman]).unwrap().pkgs(Cargo, &["ripgrep"]);
+        system(&[&Yay]).unwrap().pkgs(Cargo, &["ripgrep"]);
     }
 
     #[test]
@@ -605,6 +605,6 @@ mod tests {
 
     #[test]
     fn duplicate_provider_fails() {
-        assert!(system(&[&Pacman, &Pacman]).is_err());
+        assert!(system(&[&Yay, &Yay]).is_err());
     }
 }
