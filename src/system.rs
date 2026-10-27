@@ -72,6 +72,11 @@ impl System {
         self
     }
 
+    /// Reports whether a provider is registered
+    pub fn has_provider<P: Provider>(&self, provider: P) -> bool {
+        self.managed.iter().any(|m| m.provider.name() == provider.name())
+    }
+
     /// Symlinks every file under source to the same place under target
     pub fn link(&mut self, source: &str, target: &str) -> &mut Self {
         self.file(FileKind::Link, source, target)
