@@ -1,5 +1,5 @@
 use crate::context::Context;
-use crate::files::{self, Entry, FileAction, FileKind};
+use crate::files::{self, Entry, FileAction};
 use crate::providers::{Package, Provider};
 use crate::runner::Runner;
 use crate::state::{State, StateEntry};
@@ -206,15 +206,12 @@ pub(crate) fn next_state(ctx: &Context, entries: &[Entry], old: &State) -> State
 
 fn file_label(ctx: &Context, action: &FileAction) -> String {
     let arrow = |e: &Entry| {
-        let verb = match e.kind {
-            FileKind::Link => "->",
-            FileKind::Copy => "<=",
+        let verb = if e.kind.is_link() { "->" } else { "<=" };
+        let from = match &e.rendered {
+            Some(r) => format!("{} (template)", source(ctx, &r.template)),
+            None => source(ctx, &e.source),
         };
-        format!(
-            "{} {verb} {}",
-            short(ctx, &e.target),
-            source(ctx, &e.source)
-        )
+        format!("{} {verb} {from}", short(ctx, &e.target))
     };
     match action {
         FileAction::Create(e) => style::green(&format!("+ {}", arrow(e))),

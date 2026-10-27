@@ -13,12 +13,12 @@ mod tree;
 
 pub use cli::{Cli, Command};
 pub use context::Context;
-pub use files::{Entry, FileAction, FileKind};
+pub use files::{Entry, FileAction, FileKind, Rendered};
 pub use plan::{PackagePlan, Plan};
 pub use providers::{Cargo, Package, Pacman, Provider, SearchResult};
 pub use runner::{Cmd, Runner};
 pub use state::{State, StateEntry};
-pub use system::System;
+pub use system::{System, Template};
 pub use tree::Node;
 
 /// Common imports for configs

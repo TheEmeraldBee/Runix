@@ -13,6 +13,7 @@ pub struct Context {
     pub flags: BTreeSet<String>,
     pub root: PathBuf,
     pub home: PathBuf,
+    pub state: PathBuf,
     pub user: String,
 }
 
@@ -50,6 +51,10 @@ impl Context {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME is not set")?;
+        let state = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("runix");
         let user = env::var("SUDO_USER")
             .or_else(|_| env::var("USER"))
             .unwrap_or_default();
@@ -60,6 +65,7 @@ impl Context {
             flags,
             root,
             home,
+            state,
             user,
         })
     }

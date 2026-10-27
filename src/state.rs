@@ -27,10 +27,7 @@ pub struct State {
 impl State {
     /// Returns the runix state directory
     pub fn dir(ctx: &Context) -> PathBuf {
-        std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.home.join(".local/state"))
-            .join("runix")
+        ctx.state.clone()
     }
 
     /// Returns the state file path
@@ -63,5 +60,13 @@ impl State {
 
     pub fn find(&self, target: &Path) -> Option<&StateEntry> {
         self.files.iter().find(|f| f.target == target)
+    }
+
+    /// Records a file, replacing any record for the same target
+    pub fn upsert(&mut self, entry: StateEntry) {
+        match self.files.iter_mut().find(|f| f.target == entry.target) {
+            Some(f) => *f = entry,
+            None => self.files.push(entry),
+        }
     }
 }

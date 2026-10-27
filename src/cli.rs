@@ -60,8 +60,10 @@ pub enum Command {
     Update,
     /// Print a short summary of drift from the config
     Status,
-    /// Print content diffs for copied files
+    /// Print content diffs for copied files and templates
     Diff,
+    /// Render linked templates again and change nothing else
+    UpdateTemplates,
     /// Print the current explicit packages as config code
     Import,
     /// Search every registered provider for packages

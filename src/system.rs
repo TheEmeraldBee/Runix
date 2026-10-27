@@ -10,6 +10,7 @@ use crate::tree::Node;
 use anyhow::{Result, bail};
 use clap::Parser;
 use similar::TextDiff;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::MetadataExt;
@@ -28,7 +29,24 @@ struct Managed {
 pub struct System {
     ctx: Context,
     managed: Vec<Managed>,
-    files: Vec<FileDecl>,
+    files: RefCell<Vec<FileDecl>>,
+}
+
+/// Template declaration that takes text replacements
+pub struct Template<'a> {
+    files: &'a RefCell<Vec<FileDecl>>,
+    index: usize,
+}
+
+impl Template<'_> {
+    /// Replaces every occurrence of `from` with `to` in the rendered output (panics if `from` is empty)
+    pub fn replace(self, from: &str, to: impl Into<String>) -> Self {
+        assert!(!from.is_empty(), "template replacement text is empty");
+        self.files.borrow_mut()[self.index]
+            .replacements
+            .push((from.into(), to.into()));
+        self
+    }
 }
 
 impl System {
@@ -54,7 +72,7 @@ impl System {
         Ok(Self {
             ctx: Context::new(cli)?,
             managed,
-            files: Vec::new(),
+            files: RefCell::new(Vec::new()),
         })
     }
 
@@ -74,7 +92,9 @@ impl System {
 
     /// Reports whether a provider is registered
     pub fn has_provider<P: Provider>(&self, provider: P) -> bool {
-        self.managed.iter().any(|m| m.provider.name() == provider.name())
+        self.managed
+            .iter()
+            .any(|m| m.provider.name() == provider.name())
     }
 
     /// Symlinks every file under source to the same place under target
@@ -90,6 +110,16 @@ impl System {
     /// Alias for `clone`
     pub fn copy(&mut self, source: &str, target: &str) -> &mut Self {
         self.file(FileKind::Copy, source, target)
+    }
+
+    /// Symlinks the rendered output of every file under source to the same place under target
+    pub fn link_template(&self, source: &str, target: &str) -> Template<'_> {
+        self.template(FileKind::LinkTemplate, source, target)
+    }
+
+    /// Copies the rendered output of every file under source to the same place under target
+    pub fn clone_template(&self, source: &str, target: &str) -> Template<'_> {
+        self.template(FileKind::CopyTemplate, source, target)
     }
 
     pub fn context(&self) -> &Context {
@@ -133,7 +163,7 @@ impl System {
             .collect::<Result<Vec<_>>>()?;
 
         let state = State::load(&State::path(&self.ctx))?;
-        let entries = files::expand(&self.ctx, &self.files)?;
+        let entries = files::expand(&self.ctx, &self.files.borrow())?;
         let files = files::plan(&self.ctx, &entries, &state)?;
         let next_state = plan::next_state(&self.ctx, &entries, &state);
         Ok(Plan {
@@ -151,6 +181,7 @@ impl System {
             Command::Update => self.cmd_apply(true),
             Command::Status => self.cmd_status(),
             Command::Diff => self.cmd_diff(),
+            Command::UpdateTemplates => self.cmd_update_templates(),
             Command::Import => self.cmd_import(),
             Command::Search { query } => self.cmd_search(&query),
         }
@@ -170,12 +201,27 @@ impl System {
     }
 
     fn file(&mut self, kind: FileKind, source: &str, target: &str) -> &mut Self {
-        self.files.push(FileDecl {
+        self.files.get_mut().push(FileDecl {
             kind,
             source: source.into(),
             target: target.into(),
+            replacements: Vec::new(),
         });
         self
+    }
+
+    fn template(&self, kind: FileKind, source: &str, target: &str) -> Template<'_> {
+        let mut files = self.files.borrow_mut();
+        files.push(FileDecl {
+            kind,
+            source: source.into(),
+            target: target.into(),
+            replacements: Vec::new(),
+        });
+        Template {
+            files: &self.files,
+            index: files.len() - 1,
+        }
     }
 
     fn runner(&self) -> Runner {
@@ -214,18 +260,26 @@ impl System {
                 FileAction::Replace { entry, .. } | FileAction::Conflict { entry, .. } => entry,
                 _ => continue,
             };
-            if entry.kind != FileKind::Copy {
-                continue;
-            }
-            let (Ok(old), Ok(new)) = (
-                std::fs::read_to_string(&entry.target),
-                std::fs::read_to_string(&entry.source),
-            ) else {
+            let current = match entry.kind {
+                FileKind::Link => continue,
+                FileKind::LinkTemplate => &entry.source,
+                FileKind::Copy | FileKind::CopyTemplate => &entry.target,
+            };
+            let new = match &entry.rendered {
+                Some(r) => Ok(String::from_utf8_lossy(&r.content).into_owned()),
+                None => std::fs::read_to_string(&entry.source),
+            };
+            let (Ok(old), Ok(new)) = (std::fs::read_to_string(current), new) else {
                 continue;
             };
             let diff = TextDiff::from_lines(&old, &new);
             let target = entry.target.display().to_string();
-            let source = entry.source.display().to_string();
+            let source = entry
+                .rendered
+                .as_ref()
+                .map_or(&entry.source, |r| &r.template)
+                .display()
+                .to_string();
             print!("{}", diff.unified_diff().header(&target, &source));
         }
         Ok(())
@@ -261,13 +315,7 @@ impl System {
         }
         print!("{}", plan.tree(&self.ctx).render());
 
-        let conflicts = plan.conflicts();
-        if !conflicts.is_empty() {
-            bail!(
-                "{} conflicting files, use --adopt to back them up or --force to replace them",
-                conflicts.len()
-            );
-        }
+        ensure_no_conflicts(&plan)?;
         if plan.removals() > MASS_REMOVE && !cli.allow_mass_remove {
             bail!(
                 "the plan removes {} packages, use --allow-mass-remove to proceed",
@@ -304,6 +352,58 @@ impl System {
         }
         plan.next_state.save(&state_path)?;
         println!("{}", style::green("Applied"));
+        Ok(())
+    }
+
+    fn cmd_update_templates(&self) -> Result<()> {
+        self.ensure_not_root()?;
+        let state_path = State::path(&self.ctx);
+        let state = State::load(&state_path)?;
+        let entries = files::expand(&self.ctx, &self.files.borrow())?;
+
+        let mut actions = Vec::new();
+        let mut unplaced = 0;
+        for entry in entries.iter().filter(|e| e.kind == FileKind::LinkTemplate) {
+            match files::plan_entry(&self.ctx, entry, &state)? {
+                Some(FileAction::Create(_)) => unplaced += 1,
+                Some(action) => actions.push(action),
+                None => {}
+            }
+        }
+        if unplaced > 0 {
+            println!(
+                "{}",
+                style::yellow(&format!(
+                    "{unplaced} templates are not placed yet, run apply first"
+                ))
+            );
+        }
+
+        let mut next_state = state;
+        for action in &actions {
+            if let FileAction::Update(entry) | FileAction::Replace { entry, .. } = action {
+                next_state.upsert(entry.record());
+            }
+        }
+        let plan = Plan {
+            packages: Vec::new(),
+            files: actions,
+            next_state,
+        };
+        if plan.is_empty() {
+            println!("Templates are up to date");
+            return Ok(());
+        }
+        print!("{}", plan.tree(&self.ctx).render());
+        ensure_no_conflicts(&plan)?;
+        if self.ctx.cli.dry_run {
+            println!("Dry run, nothing changed");
+            return Ok(());
+        }
+
+        files::execute(&self.ctx, &self.runner(), &plan.files)?;
+        plan.next_state.save(&state_path)?;
+        println!("{}", style::green("Updated templates"));
         Ok(())
     }
 
@@ -367,6 +467,17 @@ impl System {
         }
         Ok(())
     }
+}
+
+fn ensure_no_conflicts(plan: &Plan) -> Result<()> {
+    let conflicts = plan.conflicts();
+    if !conflicts.is_empty() {
+        bail!(
+            "{} conflicting files, use --adopt to back them up or --force to replace them",
+            conflicts.len()
+        );
+    }
+    Ok(())
 }
 
 fn sudo_validate() -> Result<()> {

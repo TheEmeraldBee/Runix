@@ -19,6 +19,12 @@ fn main() -> Result<()> {
     system.ignore(Pacman, &["linux-cachyos", "linux-cachyos-headers"]);
 
     system.link("examples/dotfiles/hello", "~/.config/runix-example");
+    system
+        .link_template(
+            "examples/dotfiles/hello/config.toml",
+            "~/.config/runix-example/config.toml",
+        )
+        .replace("{{HOSTNAME}}", system.hostname());
 
     if system.flag("docker") {
         system.pkgs(Pacman, &["docker", "docker-compose"]);
