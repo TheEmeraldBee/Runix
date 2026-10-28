@@ -1,11 +1,12 @@
 use crate::style;
 use anyhow::{Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::process::{Command, Output, Stdio};
 
 /// External command
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cmd {
     program: String,
     args: Vec<String>,
@@ -97,6 +98,11 @@ impl Runner {
     /// Returns the stdout of a command whatever its exit status
     pub fn read_any(&self, cmd: &Cmd) -> Result<String> {
         Ok(String::from_utf8_lossy(&self.output(cmd)?.stdout).into_owned())
+    }
+
+    /// Reports whether a read-only command exits successfully
+    pub fn succeeds(&self, cmd: &Cmd) -> Result<bool> {
+        Ok(self.output(cmd)?.status.success())
     }
 
     /// Runs a command that changes the system

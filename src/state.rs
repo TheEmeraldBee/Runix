@@ -2,7 +2,7 @@ use crate::context::Context;
 use crate::files::FileKind;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ pub struct State {
     pub files: Vec<StateEntry>,
     /// Items that runix added, by resource name
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, BTreeSet<String>>,
+    pub resources: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 impl State {

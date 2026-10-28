@@ -1,16 +1,18 @@
 use crate::cli::{Cli, Command};
 use crate::context::Context;
 use crate::files::{self, FileAction, FileDecl, FileKind};
-use crate::plan::{self, Plan};
+use crate::plan::{self, Plan, ResourceChanges};
 use crate::providers::Provider;
 use crate::resources::Resource;
 use crate::runner::{Cmd, Runner};
 use crate::state::State;
 use crate::style;
 use crate::tree::Node;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use serde_json::Value;
 use similar::TextDiff;
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
@@ -26,16 +28,63 @@ struct Managed {
     used: bool,
 }
 
-struct Ensured {
-    resource: &'static dyn Resource,
-    items: BTreeSet<String>,
+struct Ensured<R: Resource> {
+    resource: R,
+    items: BTreeSet<R::Item>,
+}
+
+trait Ensure {
+    fn name(&self) -> &'static str;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Returns the item changes and the items to record in the state
+    fn plan<'a>(
+        &'a self,
+        run: &Runner,
+        owned: &[Value],
+        prune: bool,
+    ) -> Result<(Box<dyn ResourceChanges + 'a>, Vec<Value>)>;
+}
+
+impl<R: Resource> Ensure for Ensured<R> {
+    fn name(&self) -> &'static str {
+        self.resource.name()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn plan<'a>(
+        &'a self,
+        run: &Runner,
+        owned: &[Value],
+        prune: bool,
+    ) -> Result<(Box<dyn ResourceChanges + 'a>, Vec<Value>)> {
+        let owned = owned
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()))
+            .collect::<Result<BTreeSet<R::Item>, _>>()
+            .with_context(|| format!("state for resource {} is invalid", self.name()))?;
+        let plan = plan::plan_resource(run, &self.resource, &self.items, &owned, prune)?;
+        let mut next = self.items.clone();
+        if !prune {
+            next.extend(owned);
+        }
+        let next = next
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()?;
+        Ok((Box::new(plan), next))
+    }
 }
 
 /// Declared state of the machine
 pub struct System {
     ctx: Context,
     managed: Vec<Managed>,
-    resources: Vec<Ensured>,
+    resources: Vec<Box<dyn Ensure>>,
     files: RefCell<Vec<FileDecl>>,
 }
 
@@ -98,39 +147,38 @@ impl System {
         self
     }
 
-    /// Registers resources (panics if one is registered twice)
-    pub fn manage(&mut self, resources: &[&'static dyn Resource]) -> &mut Self {
-        for &resource in resources {
-            if self.has_resource(resource) {
-                panic!("resource {} is registered twice", resource.name());
-            }
-            self.resources.push(Ensured {
-                resource,
-                items: BTreeSet::new(),
-            });
+    /// Registers a resource (panics if it is registered twice)
+    pub fn manage<R: Resource>(&mut self, resource: R) -> &mut Self {
+        if self.has_resource(&resource) {
+            panic!("resource {} is registered twice", resource.name());
         }
+        self.resources.push(Box::new(Ensured {
+            resource,
+            items: BTreeSet::new(),
+        }));
         self
     }
 
     /// Declares items of a registered resource (panics if unregistered)
-    pub fn ensure<R: Resource>(&mut self, resource: R, items: &[&str]) -> &mut Self {
+    pub fn ensure<R, I>(&mut self, resource: R, items: &[I]) -> &mut Self
+    where
+        R: Resource,
+        I: Clone + Into<R::Item>,
+    {
         let name = resource.name();
-        let Some(ensured) = self
-            .resources
-            .iter_mut()
-            .find(|r| r.resource.name() == name)
-        else {
+        let Some(ensured) = self.resources.iter_mut().find(|r| r.name() == name) else {
             panic!("resource {name} is not registered, add it with System::manage");
         };
-        ensured.items.extend(items.iter().map(|i| i.to_string()));
+        let Some(ensured) = ensured.as_any_mut().downcast_mut::<Ensured<R>>() else {
+            panic!("resource {name} is registered with a different type");
+        };
+        ensured.items.extend(items.iter().cloned().map(Into::into));
         self
     }
 
     /// Reports whether a resource is registered
-    pub fn has_resource<R: Resource + ?Sized>(&self, resource: &R) -> bool {
-        self.resources
-            .iter()
-            .any(|r| r.resource.name() == resource.name())
+    pub fn has_resource<R: Resource>(&self, resource: &R) -> bool {
+        self.resources.iter().any(|r| r.name() == resource.name())
     }
 
     /// Reports whether a provider is registered
@@ -212,15 +260,10 @@ impl System {
 
         let mut resources = Vec::new();
         for r in &self.resources {
-            let name = r.resource.name();
-            let owned = state.resources.get(name).cloned().unwrap_or_default();
-            resources.push(plan::plan_resource(
-                run, r.resource, &r.items, &owned, prune,
-            )?);
-            let mut next = r.items.clone();
-            if !prune {
-                next.extend(owned);
-            }
+            let name = r.name();
+            let owned = state.resources.get(name).map_or(&[][..], Vec::as_slice);
+            let (changes, next) = r.plan(run, owned, prune)?;
+            resources.push(changes);
             if next.is_empty() {
                 next_state.resources.remove(name);
             } else {
@@ -228,7 +271,7 @@ impl System {
             }
         }
         for name in state.resources.keys() {
-            if !self.resources.iter().any(|r| r.resource.name() == name) {
+            if !self.resources.iter().any(|r| r.name() == name) {
                 eprintln!(
                     "{}",
                     style::yellow(&format!(
@@ -382,6 +425,9 @@ impl System {
         if plan.is_empty() {
             println!("Nothing to do, the system matches the config");
             if !cli.dry_run {
+                for r in &plan.resources {
+                    r.apply(&run)?;
+                }
                 plan.next_state.save(&state_path)?;
             }
             return Ok(());
@@ -424,12 +470,10 @@ impl System {
             }
         }
         for r in &plan.resources {
-            if !r.add.is_empty() {
-                r.resource.add(&run, &r.add)?;
-            }
-            if !r.remove.is_empty() {
-                r.resource.remove(&run, &r.remove)?;
-            }
+            r.execute(&run)?;
+        }
+        for r in &plan.resources {
+            r.apply(&run)?;
         }
         plan.next_state.save(&state_path)?;
         println!("{}", style::green("Applied"));
@@ -600,7 +644,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "resource user-services is registered twice")]
     fn duplicate_resource_panics() {
-        system(&[]).unwrap().manage(&[&UserServices, &UserServices]);
+        system(&[])
+            .unwrap()
+            .manage(UserServices)
+            .manage(UserServices);
     }
 
     #[test]

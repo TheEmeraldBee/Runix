@@ -1,7 +1,6 @@
 use super::Resource;
 use crate::runner::{Cmd, Runner};
 use anyhow::Result;
-use std::collections::BTreeSet;
 
 /// Systemd system units, enabled and started
 pub struct Services;
@@ -10,12 +9,14 @@ pub struct Services;
 pub struct UserServices;
 
 impl Resource for Services {
+    type Item = String;
+
     fn name(&self) -> &'static str {
         "services"
     }
 
-    fn present(&self, run: &Runner, items: &[String]) -> Result<BTreeSet<String>> {
-        enabled(run, false, items)
+    fn present(&self, run: &Runner, item: &String) -> Result<Option<bool>> {
+        enabled(run, false, item).map(Some)
     }
 
     fn add(&self, run: &Runner, items: &[String]) -> Result<()> {
@@ -32,12 +33,14 @@ impl Resource for Services {
 }
 
 impl Resource for UserServices {
+    type Item = String;
+
     fn name(&self) -> &'static str {
         "user-services"
     }
 
-    fn present(&self, run: &Runner, items: &[String]) -> Result<BTreeSet<String>> {
-        enabled(run, true, items)
+    fn present(&self, run: &Runner, item: &String) -> Result<Option<bool>> {
+        enabled(run, true, item).map(Some)
     }
 
     fn add(&self, run: &Runner, items: &[String]) -> Result<()> {
@@ -57,15 +60,9 @@ fn systemctl(user: bool) -> Cmd {
     }
 }
 
-fn enabled(run: &Runner, user: bool, items: &[String]) -> Result<BTreeSet<String>> {
-    let mut out = BTreeSet::new();
-    for unit in items {
-        let state = run.read_any(&systemctl(user).args(["is-enabled", unit.as_str()]))?;
-        if state.trim() == "enabled" {
-            out.insert(unit.clone());
-        }
-    }
-    Ok(out)
+fn enabled(run: &Runner, user: bool, unit: &str) -> Result<bool> {
+    let state = run.read_any(&systemctl(user).args(["is-enabled", unit]))?;
+    Ok(state.trim() == "enabled")
 }
 
 fn enable(run: &Runner, user: bool, items: &[String]) -> Result<()> {

@@ -31,16 +31,70 @@ impl PackagePlan<'_> {
 }
 
 /// Item changes for one resource
-pub struct ResourcePlan<'a> {
-    pub resource: &'a dyn Resource,
-    pub add: Vec<String>,
-    pub remove: Vec<String>,
+pub struct ResourcePlan<'a, R: Resource> {
+    pub resource: &'a R,
+    pub declared: Vec<R::Item>,
+    pub add: Vec<R::Item>,
+    pub remove: Vec<R::Item>,
 }
 
-impl ResourcePlan<'_> {
+/// Item changes for a resource of any kind
+pub trait ResourceChanges {
+    /// Returns the name of the resource
+    fn name(&self) -> &'static str;
+
+    /// Returns the labels of the items to add
+    fn added(&self) -> Vec<String>;
+
+    /// Returns the labels of the items to remove
+    fn removed(&self) -> Vec<String>;
+
     /// Reports whether the resource needs no change
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool;
+
+    /// Reports whether changes require root
+    fn needs_root(&self) -> bool;
+
+    /// Adds and removes the planned items
+    fn execute(&self, run: &Runner) -> Result<()>;
+
+    /// Runs the resource apply step for the declared items
+    fn apply(&self, run: &Runner) -> Result<()>;
+}
+
+impl<R: Resource> ResourceChanges for ResourcePlan<'_, R> {
+    fn name(&self) -> &'static str {
+        self.resource.name()
+    }
+
+    fn added(&self) -> Vec<String> {
+        self.add.iter().map(ToString::to_string).collect()
+    }
+
+    fn removed(&self) -> Vec<String> {
+        self.remove.iter().map(ToString::to_string).collect()
+    }
+
+    fn is_empty(&self) -> bool {
         self.add.is_empty() && self.remove.is_empty()
+    }
+
+    fn needs_root(&self) -> bool {
+        self.resource.needs_root()
+    }
+
+    fn execute(&self, run: &Runner) -> Result<()> {
+        if !self.add.is_empty() {
+            self.resource.add(run, &self.add)?;
+        }
+        if !self.remove.is_empty() {
+            self.resource.remove(run, &self.remove)?;
+        }
+        Ok(())
+    }
+
+    fn apply(&self, run: &Runner) -> Result<()> {
+        self.resource.apply(run, &self.declared)
     }
 }
 
@@ -48,7 +102,7 @@ impl ResourcePlan<'_> {
 pub struct Plan<'a> {
     pub packages: Vec<PackagePlan<'a>>,
     pub files: Vec<FileAction>,
-    pub resources: Vec<ResourcePlan<'a>>,
+    pub resources: Vec<Box<dyn ResourceChanges + 'a>>,
     /// State saved after a successful `apply`
     pub next_state: State,
 }
@@ -58,7 +112,7 @@ impl Plan<'_> {
     pub fn is_empty(&self) -> bool {
         self.packages.iter().all(PackagePlan::is_empty)
             && self.files.is_empty()
-            && self.resources.iter().all(ResourcePlan::is_empty)
+            && self.resources.iter().all(|r| r.is_empty())
     }
 
     /// Returns the file actions that block the plan
@@ -94,7 +148,7 @@ impl Plan<'_> {
         let resources = self
             .resources
             .iter()
-            .any(|r| !r.is_empty() && r.resource.needs_root());
+            .any(|r| !r.is_empty() && r.needs_root());
         pkgs || files || resources
     }
 
@@ -127,11 +181,11 @@ impl Plan<'_> {
             root.push(node);
         }
         for res in self.resources.iter().filter(|r| !r.is_empty()) {
-            let mut node = Node::new(style::bold(res.resource.name()));
-            for item in &res.add {
+            let mut node = Node::new(style::bold(res.name()));
+            for item in res.added() {
                 node.push(Node::new(style::green(&format!("+ {item}"))));
             }
-            for item in &res.remove {
+            for item in res.removed() {
                 node.push(Node::new(style::red(&format!("- {item}"))));
             }
             root.push(node);
@@ -164,9 +218,9 @@ impl Plan<'_> {
         for r in self.resources.iter().filter(|r| !r.is_empty()) {
             out.push(format!(
                 "{}: {} to add, {} to remove",
-                r.resource.name(),
-                r.add.len(),
-                r.remove.len(),
+                r.name(),
+                r.added().len(),
+                r.removed().len(),
             ));
         }
         out
@@ -227,26 +281,30 @@ pub(crate) fn plan_packages<'a>(
     })
 }
 
-pub(crate) fn plan_resource<'a>(
+pub(crate) fn plan_resource<'a, R: Resource>(
     run: &Runner,
-    resource: &'a dyn Resource,
-    declared: &BTreeSet<String>,
-    owned: &BTreeSet<String>,
+    resource: &'a R,
+    declared: &BTreeSet<R::Item>,
+    owned: &BTreeSet<R::Item>,
     prune: bool,
-) -> Result<ResourcePlan<'a>> {
-    let stale: Vec<String> = if prune {
+) -> Result<ResourcePlan<'a, R>> {
+    let stale: Vec<R::Item> = if prune {
         owned.difference(declared).cloned().collect()
     } else {
         Vec::new()
     };
-    let query: Vec<String> = declared.iter().chain(&stale).cloned().collect();
-    let present = if query.is_empty() {
-        BTreeSet::new()
-    } else {
-        resource.present(run, &query)?
-    };
+    let mut present = BTreeSet::new();
+    for item in declared.iter().chain(&stale) {
+        if resource
+            .present(run, item)?
+            .unwrap_or_else(|| owned.contains(item))
+        {
+            present.insert(item.clone());
+        }
+    }
     Ok(ResourcePlan {
         resource,
+        declared: declared.iter().cloned().collect(),
         add: declared
             .iter()
             .filter(|i| !present.contains(*i))
@@ -370,12 +428,13 @@ mod tests {
     struct FakeResource;
 
     impl Resource for FakeResource {
+        type Item = String;
+
         fn name(&self) -> &'static str {
             "fake"
         }
-        fn present(&self, _run: &Runner, items: &[String]) -> Result<BTreeSet<String>> {
-            let on = set(&["kept", "old"]);
-            Ok(items.iter().filter(|i| on.contains(*i)).cloned().collect())
+        fn present(&self, _run: &Runner, item: &String) -> Result<Option<bool>> {
+            Ok(Some(set(&["kept", "old"]).contains(item)))
         }
         fn add(&self, _run: &Runner, _items: &[String]) -> Result<()> {
             Ok(())
@@ -396,5 +455,31 @@ mod tests {
 
         let plan = plan_resource(&run, &FakeResource, &declared, &owned, false).unwrap();
         assert!(plan.remove.is_empty());
+    }
+
+    struct StateResource;
+
+    impl Resource for StateResource {
+        type Item = String;
+
+        fn name(&self) -> &'static str {
+            "state"
+        }
+        fn add(&self, _run: &Runner, _items: &[String]) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _run: &Runner, _items: &[String]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trusts_state_without_present() {
+        let run = Runner::default();
+        let declared = set(&["kept", "new"]);
+        let owned = set(&["kept", "old"]);
+        let plan = plan_resource(&run, &StateResource, &declared, &owned, true).unwrap();
+        assert_eq!(plan.add, ["new"]);
+        assert_eq!(plan.remove, ["old"]);
     }
 }
