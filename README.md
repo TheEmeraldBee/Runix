@@ -3,7 +3,7 @@
 Runix is a Rust framework for declarative OS configuration.
 
 ## Setup
-1. Run `cargo new` somewhere on your computer, I recommend doing this in `~/dotfiles`, but that's up to you.
+1. Run `cargo init` somewhere on your computer, I recommend doing this in `~/dotfiles`, but that's up to you.
 2. Run `cargo add runix --git "<todo>"`. This will add runix as a dependency to your computer
 3. Put the following code in your `src/main.rs` file:
 ```rust
@@ -19,9 +19,9 @@ fn main() -> Result<()> {
 ```
 4. Run `cargo run -- --import`. This will retrieve all the packages you should add to your file for the currently selected providers (which are now managed by runix)
 
-## Setting up aliases so `runix` works
+## Setting up aliases
 
-Each alias runs your config from any directory. Replace `~/dotfiles` with the path to your system.
+Replace `~/dotfiles` with the path to your system.
 
 - Fish
 
