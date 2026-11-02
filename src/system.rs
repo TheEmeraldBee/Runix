@@ -586,7 +586,7 @@ impl System {
     }
 
     fn ensure_not_root(&self) -> Result<()> {
-        if !self.ctx.cli.allow_root && std::fs::metadata("/proc/self")?.uid() == 0 {
+        if !self.ctx.cli.allow_root && !nix::unistd::Uid::current().is_root() {
             bail!(
                 "runix runs as your user and asks sudo when needed, use --allow-root to override"
             );
