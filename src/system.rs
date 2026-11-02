@@ -16,7 +16,6 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 const MASS_REMOVE: usize = 20;
